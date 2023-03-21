@@ -1,0 +1,119 @@
+image: caralegal/caralegal-ci:fd22804f7b2e
+
+definitions:
+  steps:
+    - script: &deploy-infrastructure |-
+        caralegal-ci infrastructure deploy \
+          --env $DEPLOY_ENV \
+          --service-name backoffice-service \
+          --env-keys=TF_VAR_domain
+    - script: &deploy-service |-
+        caralegal-ci infrastructure deploy \
+          --env $DEPLOY_ENV \
+          --service-name backoffice-service \
+          --env-keys=TF_VAR_domain \
+          --output-file=terraform-output.json \
+          --dry-run
+        caralegal-ci service deploy \
+          --env $DEPLOY_ENV \
+          --service-name backoffice-service \
+          --env-keys=TF_VAR_domain \
+          --env-keys=NEXT_PUBLIC_HOSTNAME_ENDPOINT \
+          --env-keys=NEXT_PUBLIC_GOOGLE_CLIENT_ID \
+          --env-keys=NEXT_PUBLIC_GOOGLE_CLIENT_SECRET \
+          --env-keys=BACK_OFFICE_GROUP_ID \
+          --secret-env-keys=FIREBASE_SERVICE_ACCOUNT \
+          --secret-env-keys=USER_API_KEY \
+          --terraform-output-file=infrastructure/terraform-output.json \
+          --terraform-output-env-tuples APP_KAFKA_CONNECT_ADDRESS kafka_connect_address.value
+    - step: &step-deploy-tf-dev
+        name: Deploy Infrastructure Dev
+        script:
+          - export DEPLOY_ENV=dev
+          - *deploy-infrastructure
+    - step: &step-deploy-tf-stage
+        name: Deploy Infrastructure Stage
+        script:
+          - export DEPLOY_ENV=stage
+          - *deploy-infrastructure
+    - step: &step-deploy-tf-prod
+        name: Deploy Infrastructure Prod
+        script:
+          - export DEPLOY_ENV=prod
+          - *deploy-infrastructure
+    - step: &step-deploy-cce-dev
+        name: Deploy Service Dev
+        script:
+          - export DEPLOY_ENV=dev
+          - *deploy-service
+    - step: &step-deploy-cce-stage
+        name: Deploy Service Stage
+        script:
+          - export DEPLOY_ENV=stage
+          - *deploy-service
+    - step: &step-deploy-cce-prod
+        name: Deploy Service Prod
+        script:
+          - export DEPLOY_ENV=prod
+          - *deploy-service
+
+pipelines:
+  pull-requests:
+    '**':
+      - step:
+          name: Test
+          caches:
+            - node
+          script:
+            - npm ci
+            - npm run lint
+            - npm run build
+      - step:
+          <<: *step-deploy-tf-dev
+          trigger: manual
+          name: 'PR Deployment: Infrastructure Dev'
+      - step:
+          <<: *step-deploy-cce-dev
+          name: 'PR Deployment: Deploy Service'
+  branches:
+    master:
+      - step:
+          name: Test
+          caches:
+            - node
+          script:
+            - npm ci
+            - npm run lint
+            - npm run build
+      - step:
+          name: Build Image
+          caches:
+            - node
+          script:
+            - docker build -t backoffice-service:$BITBUCKET_COMMIT ./
+      - step: *step-deploy-tf-dev
+      - step: *step-deploy-cce-dev
+      - parallel:
+          - step:
+              name: Create tag for Stage release
+              trigger: 'manual'
+              script:
+                - git tag stage-release-$(date +"%Y-%m-%d-%H-%M-%S")
+                - git push origin stage-release-$(date +"%Y-%m-%d-%H-%M-%S")
+          - step:
+              name: Create tag for Prod release
+              trigger: 'manual'
+              script:
+                - git tag prod-release-$(date +"%Y-%m-%d-%H-%M-%S")
+                - git push origin prod-release-$(date +"%Y-%m-%d-%H-%M-%S")
+  tags:
+    stage-release-*:
+      - step: *step-deploy-tf-stage
+      - step: *step-deploy-cce-stage
+    prod-release-*:
+      - step: *step-deploy-tf-prod
+      - step: *step-deploy-cce-prod
+
+options:
+  max-time: 10
+  docker: true
